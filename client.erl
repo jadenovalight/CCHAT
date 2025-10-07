@@ -1,44 +1,28 @@
 -module(client).
 -export([handle/2, initial_state/3]).
 
-% Client state record
-% Maintains client-specific information and connection status
+% Client state record (保持原框架的简单结构)
 -record(client_st, {
-    gui,             % PID/Atom of the GUI process
-    nick,            % Client's current nickname
-    server,          % Atom of the connected server
-    channels = [],   % List of {ChannelName, ChannelPid} tuples for joined channels
-    receiver         % PID of the message receiver process
+    gui,      % atom of the GUI process
+    nick,     % nick/username of the client
+    server,   % atom of the chat server
+    channels = []  % List of {ChannelName, ChannelPid} tuples for joined channels
 }).
 
 % Initializes a new client state with given parameters
-% Spawns a receiver process for handling incoming messages
 initial_state(Nick, GUIAtom, ServerAtom) ->
-    ReceiverPid = spawn(fun() -> receiver_loop(GUIAtom) end),
     #client_st{
         gui = GUIAtom,
         nick = Nick,
         server = ServerAtom,
-        channels = [],
-        receiver = ReceiverPid
+        channels = []
     }.
-
-% Message receiver loop
-% Handles incoming messages from channels and forwards to GUI
-receiver_loop(GUI) ->
-    receive
-        {message_receive, Channel, Nick, Msg} ->
-            gen_server:call(GUI, {message_receive, Channel, Nick++"> "++Msg}),
-            receiver_loop(GUI);
-        stop ->
-            ok  % Terminate loop when stop signal received
-    end.
 
 % Handle channel join request
 handle(St, {join, Channel}) ->
     ServerAtom = St#client_st.server,
     Nick = St#client_st.nick,
-    ReceiverPid = St#client_st.receiver,
+    ClientPid = self(),  % 使用客户端进程自己的 PID
     
     % Check if already joined to this channel
     case lists:keyfind(Channel, 1, St#client_st.channels) of
@@ -47,7 +31,7 @@ handle(St, {join, Channel}) ->
         false ->
             try
                 % Request server to join channel
-                case genserver:request(ServerAtom, {join, Channel, ReceiverPid, Nick}, 1000) of
+                case genserver:request(ServerAtom, {join, Channel, ClientPid, Nick}, 1000) of
                     {ok, ChannelPid} ->
                         % Successfully joined - update channel list
                         NewChannels = [{Channel, ChannelPid} | St#client_st.channels],
@@ -70,13 +54,13 @@ handle(St, {leave, Channel}) ->
         false ->
             {reply, {error, user_not_joined, "You are not in this channel"}, St};
         {Channel, ChannelPid} ->
-            ReceiverPid = St#client_st.receiver,
+            ClientPid = self(),
             % Remove channel from client's list
             NewChannels = lists:keydelete(Channel, 1, St#client_st.channels),
             
             % Attempt to notify channel of departure (ignore failures)
             try
-                genserver:request(ChannelPid, {leave, ReceiverPid}, 1000)
+                genserver:request(ChannelPid, {leave, ClientPid}, 1000)
             catch
                 _:_ -> ok
             end,
@@ -85,6 +69,7 @@ handle(St, {leave, Channel}) ->
     end;
 
 % Handle message sending to a channel
+% 保持你原有的完整判断逻辑
 handle(St, {message_send, Channel, Msg}) ->
     % Check if client is in the channel
     case lists:keyfind(Channel, 1, St#client_st.channels) of
@@ -92,11 +77,11 @@ handle(St, {message_send, Channel, Msg}) ->
             % Not in channel - check with server if channel exists
             ServerAtom = St#client_st.server,
             Nick = St#client_st.nick,
-            ReceiverPid = St#client_st.receiver,
+            ClientPid = self(),
             
             try
                 % Attempt to send message through server
-                Result = genserver:request(ServerAtom, {message, Channel, Nick, Msg, ReceiverPid}, 1000),
+                Result = genserver:request(ServerAtom, {message, Channel, Nick, Msg, ClientPid}, 1000),
                 case Result of
                     {error, user_not_joined} ->
                         % Server confirms channel exists but client isn't joined
@@ -116,10 +101,10 @@ handle(St, {message_send, Channel, Msg}) ->
         {Channel, ChannelPid} ->
             % Already in channel - send message directly
             Nick = St#client_st.nick,
-            ReceiverPid = St#client_st.receiver,
+            ClientPid = self(),
             
             try
-                case genserver:request(ChannelPid, {message, Nick, Msg, ReceiverPid}, 1000) of
+                case genserver:request(ChannelPid, {message, Nick, Msg, ClientPid}, 1000) of
                     ok ->
                         {reply, ok, St};
                     _ ->
@@ -159,30 +144,24 @@ handle(St, {nick, NewNick}) ->
             end
     end;
 
-% Handle request for current nickname
-handle(St, whoami) ->
-    {reply, St#client_st.nick, St};
+% ---------------------------------------------------------------------------
+% The cases below do not need to be changed...
+% But you should understand how they work!
 
-% Handle incoming message from channel (forward to GUI)
+% Get current nick
+handle(St, whoami) ->
+    {reply, St#client_st.nick, St} ;
+
+% Incoming message (from channel, to GUI)
 handle(St = #client_st{gui = GUI}, {message_receive, Channel, Nick, Msg}) ->
     gen_server:call(GUI, {message_receive, Channel, Nick++"> "++Msg}),
-    {reply, ok, St};
+    {reply, ok, St} ;
 
-% Handle client quit request
+% Quit client via GUI
 handle(St, quit) ->
-    ReceiverPid = St#client_st.receiver,
-    % Notify all joined channels of departure
-    lists:foreach(fun({_Channel, ChannelPid}) ->
-        try
-            genserver:request(ChannelPid, {leave, ReceiverPid}, 500)
-        catch
-            _:_ -> ok  % Ignore failures during cleanup
-        end
-    end, St#client_st.channels),
-    % Stop the receiver process
-    ReceiverPid ! stop,
-    {reply, ok, St};
+    % Any cleanup should happen here, but this is optional
+    {reply, ok, St} ;
 
-% Catch-all handler for unimplemented commands
+% Catch-all for any unhandled requests
 handle(St, _Data) ->
-    {reply, {error, not_implemented, "Client does not handle this command"}, St}.
+    {reply, {error, not_implemented, "Client does not handle this command"}, St} .
