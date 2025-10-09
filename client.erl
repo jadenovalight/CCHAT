@@ -25,8 +25,7 @@ handle(St, {join, Channel}) ->
             {reply, {error, user_already_joined, "You have already joined this channel"}, St};
         false ->
             try
-                case genserver:request(St#client_st.server, 
-                                     {join, Channel, self(), St#client_st.nick}, 1000) of
+                case genserver:request(St#client_st.server, {join, Channel, self()}, 1000) of
                     {ok, ChannelPid} ->
                         NewChannels = [{Channel, ChannelPid} | St#client_st.channels],
                         {reply, ok, St#client_st{channels = NewChannels}};
@@ -62,15 +61,11 @@ handle(St, {message_send, Channel, Msg}) ->
         false ->
             % Not in channel - check with server if channel exists
             try
-                Result = genserver:request(St#client_st.server, 
-                                         {message, Channel, St#client_st.nick, Msg, self()}, 1000),
-                case Result of
+                case genserver:request(St#client_st.server, {message, Channel, St#client_st.nick, Msg, self()}) of
                     {error, user_not_joined} ->
                         {reply, {error, user_not_joined, "You are not in this channel"}, St};
                     {error, channel_not_found} ->
-                        {reply, {error, server_not_reached, "Cannot reach server"}, St};
-                    _ ->
-                        {reply, {error, user_not_joined, "You are not in this channel"}, St}
+                        {reply, {error, server_not_reached, "Cannot reach server"}, St}
                 end
             catch
                 _:_ ->
@@ -79,7 +74,7 @@ handle(St, {message_send, Channel, Msg}) ->
         {Channel, ChannelPid} ->
             % Already in channel - send message directly
             try
-                case genserver:request(ChannelPid, {message, St#client_st.nick, Msg, self()}, 1000) of
+                case genserver:request(ChannelPid, {message, Channel, St#client_st.nick, Msg, self()}) of
                     ok ->
                         {reply, ok, St};
                     _ ->
@@ -98,8 +93,7 @@ handle(St, {nick, NewNick}) ->
             {reply, ok, St};
         _ ->
             try
-                case genserver:request(St#client_st.server, 
-                                     {nick, St#client_st.nick, NewNick}, 1000) of
+                case genserver:request(St#client_st.server, {nick, NewNick}, 1000) of
                     ok ->
                         {reply, ok, St#client_st{nick = NewNick}};
                     {error, nick_taken} ->

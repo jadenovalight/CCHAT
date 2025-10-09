@@ -1,27 +1,19 @@
 -module(server).
 -export([start/1, stop/1]).
 
-% State: List of channel names (strings)
-
 % Starts a new server process registered under the given atom
 start(ServerAtom) ->
+    % start(Atom, State, F)
     genserver:start(ServerAtom, [], fun handle/2).
 
 % Stops the server and all associated channels
 stop(ServerAtom) ->
-    try
-        Channels = genserver:request(ServerAtom, get_state, 1000),
-        lists:foreach(fun(Channel) ->
-            genserver:stop(list_to_atom(Channel))
-        end, Channels)
-    catch
-        _:_ -> ok
-    end,
-    genserver:stop(ServerAtom),
-    ok.
+    genserver:request(ServerAtom, stop_channels),
+    genserver:stop(ServerAtom).
 
+% State: List of channel names (strings)
 % Handle join requests
-handle(Channels, {join, Channel, ClientPid, _Nick}) ->
+handle(Channels, {join, Channel, ClientPid}) ->
     case lists:member(Channel, Channels) of
         true ->
             % Channel exists, join it
@@ -42,7 +34,7 @@ handle(Channels, {join, Channel, ClientPid, _Nick}) ->
 handle(Channels, {message, Channel, Nick, Msg, ClientPid}) ->
     case lists:member(Channel, Channels) of
         true ->
-            case genserver:request(list_to_atom(Channel), {message, Nick, Msg, ClientPid}) of
+            case genserver:request(list_to_atom(Channel), {message, Channel, Nick, Msg, ClientPid}) of
                 ok ->
                     {reply, ok, Channels};
                 {error, not_joined} ->
@@ -53,18 +45,15 @@ handle(Channels, {message, Channel, Nick, Msg, ClientPid}) ->
     end;
 
 % Handle nickname change requests
-handle(Channels, {nick, _OldNick, NewNick}) ->
+handle(Channels, {nick, NewNick}) ->
     % Check if new nick is already in use in any channel
-    IsTaken = lists:any(fun(Channel) ->
-        try
-            case genserver:request(list_to_atom(Channel), {check_nick, NewNick}, 1000) of
+    IsTaken = lists:any(
+        fun(Channel) ->
+            case genserver:request(list_to_atom(Channel), {check_nick, NewNick}) of
                 nick_taken -> true;
                 ok -> false
             end
-        catch
-            _:_ -> false
-        end
-    end, Channels),
+        end, Channels),
     
     case IsTaken of
         true ->
@@ -73,18 +62,14 @@ handle(Channels, {nick, _OldNick, NewNick}) ->
             {reply, ok, Channels}
     end;
 
-% Get state (for administrative purposes)
-handle(Channels, get_state) ->
-    {reply, Channels, Channels};
-
-% Health check
-handle(Channels, ping) ->
-    {reply, pong, Channels};
-
-% Unknown request
-handle(Channels, _) ->
-    {reply, {error, unknown_request}, Channels}.
-
+handle(Channels, stop_channels) ->
+    % 遍历所有频道进程并停止它们
+    % lists:foreach(匿名函数, 要遍历的列表)，fun ... end：定义匿名函数
+    lists:foreach(
+        fun(Channel) ->
+            genserver:stop(list_to_atom(Channel))% list_to_atom(Channel)：将字符串转换为原子（进程注册名）
+        end, Channels),
+    {reply, ok, Channels}.
 
 % ============================================================================
 % Channel handler function
@@ -111,26 +96,14 @@ handle_channel(Clients, {leave, ClientPid}) ->
     end;
 
 % Handle message broadcast
-handle_channel(Clients, {message, Nick, Msg, SenderPid}) ->
+handle_channel(Clients, {message, Channel, Nick, Msg, SenderPid}) ->
     case lists:member(SenderPid, Clients) of
         true ->
-            ChannelAtom = process_info(self(), registered_name),
-            ChannelName = case ChannelAtom of
-                {registered_name, Name} -> 
-                    atom_to_list(Name);
-                _ -> 
-                    "unknown"
-            end,
-            
             spawn(fun() ->
                 lists:foreach(fun(ClientPid) ->
                     if 
                         ClientPid =/= SenderPid ->
-                            try
-                                genserver:request(ClientPid, {message_receive, ChannelName, Nick, Msg}, 1000)
-                            catch
-                                _:_ -> ok  % Ignore if client is unreachable
-                            end;
+                            genserver:request(ClientPid, {message_receive, Channel, Nick, Msg});
                         true -> 
                             ok
                     end
@@ -142,22 +115,15 @@ handle_channel(Clients, {message, Nick, Msg, SenderPid}) ->
             {reply, {error, not_joined}, Clients}
     end;
 
-% Check if a nick is in use in this channel (for distinction assignment)
+% Check if a nick is used (for distinction assignment)
 handle_channel(Clients, {check_nick, NewNick}) ->
-    IsTaken = lists:any(fun(ClientPid) ->
-        try
-            CurrentNick = genserver:request(ClientPid, whoami, 1000),
+    IsTaken = lists:any(
+        fun(ClientPid) ->
+            CurrentNick = genserver:request(ClientPid, whoami),
             CurrentNick =:= NewNick
-        catch
-            _:_ -> false
-        end
-    end, Clients),
+        end, Clients),
     
     case IsTaken of
         true -> {reply, nick_taken, Clients};
         false -> {reply, ok, Clients}
-    end;
-
-% Unknown request
-handle_channel(Clients, _) ->
-    {reply, {error, unknown_request}, Clients}.
+    end.
